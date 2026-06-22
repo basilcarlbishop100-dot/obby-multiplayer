@@ -1,723 +1,770 @@
-// MULTIPLAYER OBBY — with real 3D model, kill bricks & ladders
-// -----------------------------------------------
-// HOST:   dotnet run -- host
-// CLIENT: dotnet run -- client 192.168.X.X
-// -----------------------------------------------
-// Controls:
-//   WASD        — move
-//   SPACE       — jump
-//   W (on ladder)— climb up
-//   S (on ladder)— climb down
-//   Q/E or ←/→  — rotate camera
-//   ESC         — quit
-// -----------------------------------------------
-
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
 using Raylib_cs;
 using System.Numerics;
-using System.Globalization;
 
-class Program
+namespace MyNewApp
 {
-    // =============================================
-    // NETWORK
-    // =============================================
-    const int   PORT      = 7777;
-    const float SEND_RATE = 1f / 30f;
-    static UdpClient  udp = null!;
-    static IPEndPoint remoteEP = null!;
-    static bool       connected = false;
-    static bool       isHost    = false;
-    static float      sendTimer = 0f;
+    enum GameState { Flying, BossFight, PlanetApproach, Landing, Upgrading, GameOver }
 
-    // =============================================
-    // LEVEL OBJECTS
-    // =============================================
-    enum ObjKind { Platform, Kill, Ladder }
-
-    struct LevelObj
+    class Program
     {
-        public Vector3  Center;
-        public Vector3  Size;
-        public ObjKind  Kind;
-        public Color    DrawColor; // fallback color if no model
-    }
-
-    static List<LevelObj> levelObjs = new();
-
-    // Starting spawn position (lowest platform cluster)
-    static Vector3 SPAWN = new Vector3(-210.9f, -26.5f, 138.0f);
-    static Vector3 customSpawn = new Vector3(-210.9f, -26.5f, 138.0f);
-
-    static void BuildLevel()
-    {
-        levelObjs.Clear();
-
-        // --- Platforms (small objects only, exclude giant merged meshes) ---
-        // Only include objects where all three size dims < 80 units (giant ones are merged meshes)
-        var raw = new (float cx, float cy, float cz, float sx, float sy, float sz, ObjKind kind)[]
+        private struct Obstacle
         {
-            // == STARTING AREA (bottom cluster) ==
-            (-210.3f,-57.9f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-182.3f,-57.9f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-184.3f,-57.9f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-208.3f,-57.8f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-202.3f,-57.8f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-204.3f,-57.8f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-206.3f,-57.8f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-200.3f,-57.8f,138.3f, 4f,1f,4f, ObjKind.Platform),
-            (-177.3f,-57.7f,138.2f, 3f,1f,3f, ObjKind.Platform),
-            (-173.3f,-57.7f,138.2f, 4f,1f,4f, ObjKind.Platform),
-            (-171.3f,-57.7f,138.2f, 4f,1f,4f, ObjKind.Platform),
-            (-175.3f,-57.7f,138.2f, 4f,1f,4f, ObjKind.Platform),
-
-            // == STEPPING STONES GOING UP ==
-            (-210.3f,-55.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-53.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-51.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-49.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-47.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-45.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-199.8f,-43.9f,137.8f, 4f,1f,5f, ObjKind.Platform),
-            (-210.3f,-43.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-41.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.3f,-39.7f,137.7f, 3f,1f,2f, ObjKind.Platform),
-
-            // == KILL BRICK SECTION ==
-            (-210.2f,-36.8f,137.8f, 3f,1f,2.5f, ObjKind.Kill),
-            (-210.2f,-34.8f,137.8f, 3f,1f,2.5f, ObjKind.Kill),
-            (-210.2f,-32.8f,137.8f, 3f,1f,2.5f, ObjKind.Kill),
-
-            // Skip past killers — safe platform to jump to
-            (-210.9f,-29.7f,138.0f, 4f,1f,4f, ObjKind.Platform),
-            (-210.9f,-25.7f,138.0f, 4f,1f,4f, ObjKind.Platform),
-
-            // == BIG SAFE PLATFORM ==
-            (-163.4f,-31.1f,140.6f, 30f,1f,5f, ObjKind.Platform),
-
-            // == LADDER SECTION ==
-            // Ladder object (players climb this)
-            (-210.3f,-18.7f,138.2f, 3f,20f,3f, ObjKind.Ladder),
-
-            // Platforms above ladder
-            (-210.3f,-15.2f,138.1f, 2.5f,1f,3f, ObjKind.Platform),
-            (-210.3f,-13.2f,138.1f, 2.5f,1f,3f, ObjKind.Platform),
-            (-210.3f,-11.2f,138.1f, 2.5f,1f,3f, ObjKind.Platform),
-            (-210.3f,-9.2f,138.1f,  2.5f,1f,3f, ObjKind.Platform),
-            (-210.3f,-7.2f,138.1f,  2.5f,1f,3f, ObjKind.Platform),
-
-            // == MORE PLATFORMS ==
-            (-210.1f,-5.2f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.1f,-3.2f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.1f,-1.2f,137.7f, 3f,1f,2f, ObjKind.Platform),
-            (-210.1f, 0.8f,137.7f, 3f,1f,2f, ObjKind.Platform),
-
-            // Kill bricks in middle
-            (-210.26f, 2.78f,138.31f, 3f,1f,3f, ObjKind.Kill),
-            (-210.26f, 6.78f,138.31f, 3f,1f,3f, ObjKind.Kill),
-            (-210.26f, 8.78f,138.31f, 3f,1f,3f, ObjKind.Kill),
-            (-210.26f,10.78f,138.31f, 3f,1f,3f, ObjKind.Kill),
-            (-210.26f,12.78f,138.31f, 3f,1f,3f, ObjKind.Kill),
-
-            // Safe platforms to navigate around killers
-            (-210.0f,14.7f,137.7f, 3f,1f,3f, ObjKind.Platform),
-            (-210.4f,16.8f,138.1f, 3f,1f,3f, ObjKind.Platform),
-
-            // == WIDE SECTION ==
-            (-166.8f,20.8f,142.6f, 15f,1f,4f, ObjKind.Platform),
-
-            // == FINAL PLATFORMS ==
-            (-200.8f,20.9f,138.6f, 3f,1f,3f, ObjKind.Platform),
-            (-196.8f,20.9f,138.6f, 3f,1f,3f, ObjKind.Platform),
-            (-202.8f,20.9f,138.6f, 3f,1f,3f, ObjKind.Platform),
-            (-194.3f,21.3f,138.2f, 3f,1f,3f, ObjKind.Platform),
-            (-189.3f,21.3f,138.0f, 3f,1f,3f, ObjKind.Platform),
-            (-208.3f,21.3f,138.2f, 5f,1f,5f, ObjKind.Platform), // FINISH
-        };
-
-        foreach (var r in raw)
-        {
-            Color col = r.kind switch {
-                ObjKind.Kill    => new Color(255, 40, 40, 255),
-                ObjKind.Ladder  => new Color(180, 120, 40, 255),
-                _               => new Color(
-                    80 + (Math.Abs((int)(r.cx * 7)) % 120),
-                    80 + (Math.Abs((int)(r.cy * 11)) % 120),
-                    80 + (Math.Abs((int)(r.cz * 13)) % 120),
-                    255)
-            };
-            levelObjs.Add(new LevelObj {
-                Center    = new Vector3(r.cx, r.cy, r.cz),
-                Size      = new Vector3(r.sx, r.sy, r.sz),
-                Kind      = r.kind,
-                DrawColor = col
-            });
-        }
-    }
-
-    static int FinishIndex => levelObjs.Count - 1;
-
-    // =============================================
-    // PLAYER STATE
-    // =============================================
-    struct PlayerState
-    {
-        public Vector3 Pos;
-        public Vector3 Vel;
-        public bool    OnGround;
-        public bool    OnLadder;
-        public int     Checkpoint;
-        public bool    Won;
-    }
-
-    static PlayerState me;
-    static PlayerState them;
-    static float       theirLastSeen = -999f;
-    static float       totalTime     = 0f;
-
-    static void Respawn(ref PlayerState p)
-    {
-        if (p.Checkpoint == 0)
-        {
-            // Always respawn at the designated spawn point
-            p.Pos      = customSpawn;
-            p.Vel      = Vector3.Zero;
-            p.OnGround = false;
-            p.OnLadder = false;
-            return;
-        }
-        int idx = Math.Clamp(p.Checkpoint, 0, levelObjs.Count - 1);
-        var obj  = levelObjs[idx];
-        p.Pos      = new Vector3(obj.Center.X, obj.Center.Y + obj.Size.Y / 2f + 1.2f, obj.Center.Z);
-        p.Vel      = Vector3.Zero;
-        p.OnGround = false;
-        p.OnLadder = false;
-    }
-
-    // =============================================
-    // PHYSICS
-    // =============================================
-    const float GRAVITY      = -18f;
-    const float JUMP_FORCE   =  18f;
-    const float MOVE_SPEED   =  10f;
-    const float MOVE_ACCEL   =  20f;
-    const float MOVE_DAMP    =  14f;
-    const float LADDER_SPEED =   6f;
-
-    static void UpdatePlayer(ref PlayerState p, float dt, float camYaw)
-    {
-        if (p.Won) return;
-
-        float yawRad = camYaw * MathF.PI / 180f;
-        Vector3 fwd  = new Vector3(-MathF.Sin(yawRad), 0, -MathF.Cos(yawRad));
-        Vector3 rgt  = new Vector3( MathF.Cos(yawRad), 0, -MathF.Sin(yawRad));
-
-        // --- Check if inside a ladder ---
-        p.OnLadder = false;
-        foreach (var obj in levelObjs)
-        {
-            if (obj.Kind != ObjKind.Ladder) continue;
-            if (InAABB(p.Pos, obj.Center, obj.Size + new Vector3(0.6f, 0f, 0.6f)))
-            {
-                p.OnLadder = true;
-                break;
-            }
+            public Vector3 Position;
+            public float Radius;
+            public Color MainColor;
+            public Color WireColor;
+            public float RotationSpeed;
+            public float CurrentRotation;
+            public float Health;
         }
 
-        if (p.OnLadder)
+        private struct Star
         {
-            // On ladder: free Y movement, lock horizontal
-            p.Vel.X = 0; p.Vel.Z = 0;
-            p.Vel.Y = 0;
-            if (Raylib.IsKeyDown(KeyboardKey.W)) p.Vel.Y =  LADDER_SPEED;
-            if (Raylib.IsKeyDown(KeyboardKey.S)) p.Vel.Y = -LADDER_SPEED;
-            if (Raylib.IsKeyPressed(KeyboardKey.Space)) { p.Vel.Y = JUMP_FORCE; p.OnLadder = false; }
-        }
-        else
-        {
-            // Normal horizontal movement
-            Vector3 wish = Vector3.Zero;
-            if (Raylib.IsKeyDown(KeyboardKey.W)) wish += fwd;
-            if (Raylib.IsKeyDown(KeyboardKey.S)) wish -= fwd;
-            if (Raylib.IsKeyDown(KeyboardKey.A)) wish -= rgt;
-            if (Raylib.IsKeyDown(KeyboardKey.D)) wish += rgt;
-
-            if (wish.LengthSquared() > 0) wish = Vector3.Normalize(wish);
-
-            p.Vel.X = Lerp(p.Vel.X, wish.X * MOVE_SPEED, MOVE_ACCEL * dt);
-            p.Vel.Z = Lerp(p.Vel.Z, wish.Z * MOVE_SPEED, MOVE_ACCEL * dt);
-
-            if (wish.LengthSquared() == 0)
-            {
-                p.Vel.X = Lerp(p.Vel.X, 0, MOVE_DAMP * dt);
-                p.Vel.Z = Lerp(p.Vel.Z, 0, MOVE_DAMP * dt);
-            }
-
-            // Gravity
-            p.Vel.Y += GRAVITY * dt;
-
-            // Jump
-            if (Raylib.IsKeyPressed(KeyboardKey.Space) && p.OnGround)
-            {
-                p.Vel.Y = JUMP_FORCE;
-                p.OnGround = false;
-            }
+            public Vector3 Position;
+            public float SpeedModifier;
         }
 
-        // Move
-        p.Pos += p.Vel * dt;
-
-        // --- Collision ---
-        p.OnGround = false;
-        float playerR = 0.45f;  // horizontal radius
-        float playerH = 1.8f;   // player height
-
-        for (int i = 0; i < levelObjs.Count; i++)
+        private struct Laser
         {
-            var obj = levelObjs[i];
-            if (obj.Kind == ObjKind.Ladder) continue;
-
-            float hw  = obj.Size.X / 2f + playerR;
-            float hh  = obj.Size.Y / 2f;
-            float hd  = obj.Size.Z / 2f + playerR;
-            float top = obj.Center.Y + obj.Size.Y / 2f;
-            float bot = obj.Center.Y - obj.Size.Y / 2f;
-
-            // Player feet = p.Pos.Y, head = p.Pos.Y + playerH
-            float pFeet = p.Pos.Y;
-            float pHead = p.Pos.Y + playerH;
-
-            bool overX = p.Pos.X > obj.Center.X - hw && p.Pos.X < obj.Center.X + hw;
-            bool overY = pFeet < top && pHead > bot;
-            bool overZ = p.Pos.Z > obj.Center.Z - hd && p.Pos.Z < obj.Center.Z + hd;
-
-            if (!overX || !overY || !overZ) continue;
-
-            if (obj.Kind == ObjKind.Kill)
-            {
-                Respawn(ref p);
-                return;
-            }
-
-            // Find smallest penetration axis and push out
-            float overlapTop   = top  - pFeet;       // push up
-            float overlapBot   = pHead - bot;         // push down
-            float overlapLeft  = (obj.Center.X + hw) - p.Pos.X;
-            float overlapRight = p.Pos.X - (obj.Center.X - hw);
-            float overlapFront = (obj.Center.Z + hd) - p.Pos.Z;
-            float overlapBack  = p.Pos.Z - (obj.Center.Z - hd);
-
-            float minH = Math.Min(overlapLeft, overlapRight);
-            float minV = Math.Min(overlapTop, overlapBot);
-            float minZ = Math.Min(overlapFront, overlapBack);
-
-            if (minV < minH && minV < minZ)
-            {
-                // Vertical resolve
-                if (overlapTop < overlapBot)
-                {
-                    // Land on top
-                    p.Pos.Y    = top + 0.001f;
-                    p.Vel.Y    = 0f;
-                    p.OnGround = true;
-                    if (i > p.Checkpoint) p.Checkpoint = i;
-                    if (i == FinishIndex && !p.Won) { p.Won = true; Send("WIN"); }
-                }
-                else
-                {
-                    // Hit head on bottom
-                    p.Pos.Y = bot - playerH - 0.001f;
-                    if (p.Vel.Y > 0) p.Vel.Y = 0f;
-                }
-            }
-            else if (minH < minZ)
-            {
-                // Push out on X
-                if (overlapLeft < overlapRight)
-                    p.Pos.X = obj.Center.X + hw + 0.001f;
-                else
-                    p.Pos.X = obj.Center.X - hw - 0.001f;
-                p.Vel.X = 0f;
-            }
-            else
-            {
-                // Push out on Z
-                if (overlapFront < overlapBack)
-                    p.Pos.Z = obj.Center.Z + hd + 0.001f;
-                else
-                    p.Pos.Z = obj.Center.Z - hd - 0.001f;
-                p.Vel.Z = 0f;
-            }
+            public Vector3 Position;
+            public bool Active;
+            public bool FromWingLeft;
         }
 
-        // Fall death
-        float lowestY = -999f;
-        if (p.Checkpoint < levelObjs.Count)
-            lowestY = levelObjs[p.Checkpoint].Center.Y - 20f;
-        if (p.Pos.Y < lowestY) Respawn(ref p);
-    }
-
-    // =============================================
-    // MAIN
-    // =============================================
-    static float camYaw = 0f;
-
-    static void Main(string[] args)
-    {
-        if (args.Length == 0)
+        private struct Particle
         {
-            Console.WriteLine("Usage:");
-            Console.WriteLine("  HOST:   dotnet run -- host");
-            Console.WriteLine("  CLIENT: dotnet run -- client <host-ip>");
-            return;
+            public Vector3 Position;
+            public Vector3 Velocity;
+            public Color MainColor;
+            public float Lifetime;
+            public bool Active;
         }
 
-        isHost = args[0].ToLower() == "host";
-        BuildLevel();
-
-        me   = new PlayerState { Pos = customSpawn, Checkpoint = 0 };
-        them = new PlayerState { Pos = new Vector3(-207.9f, -26.5f, 138.0f), Checkpoint = 0 };
-
-        // Network
-        if (isHost)
+        private static float CustomLerp(float start, float end, float amount)
         {
-            udp      = new UdpClient(PORT);
-            remoteEP = new IPEndPoint(IPAddress.Any, 0);
-            Console.WriteLine($"[HOST] {GetLocalIP()}:{PORT}");
+            return start + (end - start) * amount;
         }
-        else
-        {
-            if (args.Length < 2) { Console.WriteLine("Provide host IP: dotnet run -- client 192.168.X.X"); return; }
-            remoteEP = new IPEndPoint(IPAddress.Parse(args[1].Trim()), PORT);
-            udp      = new UdpClient();
-            udp.Connect(remoteEP);
-            Console.WriteLine($"[CLIENT] → {args[1]}:{PORT}");
-            new Thread(() => { while (!connected) { Send("HELLO"); Thread.Sleep(400); } }) { IsBackground = true }.Start();
-        }
-        new Thread(ReceiveLoop) { IsBackground = true }.Start();
 
-        // Window
-        Raylib.InitWindow(1280, 720, isHost ? "OBBY — HOST (Blue)" : "OBBY — CLIENT (Red)");
-        Raylib.SetTargetFPS(60);
+        // --- EMBEDDED FRAGMENT SHADER (GLSL v330) ---
+        // This adds subtle scanlines, a dark space vignette, and a slight cosmic color tint
+        private const string ScreenShaderCode = @"#version 330
+            in vec2 fragTexCoord;
+            in vec4 fragColor;
+            out vec4 finalColor;
+            uniform sampler2D texture0;
+            uniform vec4 colDiffuse;
+            uniform float time;
 
-        // We use geometry boxes for rendering (model coords used for level layout)
-        Model? obbyModel = null;
-        Console.WriteLine("[INFO] Using geometry rendering.");
-
-        Color myCol    = isHost ? new Color(60, 120, 255, 255) : new Color(255, 80, 80, 255);
-        Color theirCol = isHost ? new Color(255, 80, 80, 255)  : new Color(60, 120, 255, 255);
-
-        float camPitch = 20f;
-        float camDist  = 20f;
-
-        while (!Raylib.WindowShouldClose())
-        {
-            float dt = Raylib.GetFrameTime();
-            totalTime += dt;
-
-            // Press F to save current position as spawn point
-            if (Raylib.IsKeyPressed(KeyboardKey.F))
-            {
-                customSpawn = me.Pos;
-                Console.WriteLine($"[SPAWN SET] {me.Pos.X:F1}, {me.Pos.Y:F1}, {me.Pos.Z:F1}");
-            }
-            // Press R to respawn at saved spawn
-            if (Raylib.IsKeyPressed(KeyboardKey.R))
-            {
-                me.Pos = customSpawn;
-                me.Vel = Vector3.Zero;
-            }
-
-            // Camera rotation — mouse drag OR Q/E keys
-            if (Raylib.IsMouseButtonDown(MouseButton.Right))
-            {
-                Vector2 mouseDelta = Raylib.GetMouseDelta();
-                camYaw   -= mouseDelta.X * 0.12f;
-                camPitch  = Math.Clamp(camPitch + mouseDelta.Y * 0.10f, 5f, 80f);
-                Raylib.HideCursor();
-            }
-            else
-            {
-                Raylib.ShowCursor();
-            }
-            // Scroll to zoom
-            float scroll = Raylib.GetMouseWheelMove();
-            camDist = Math.Clamp(camDist - scroll * 2f, 5f, 60f);
-
-            if (Raylib.IsKeyDown(KeyboardKey.Left)  || Raylib.IsKeyDown(KeyboardKey.Q)) camYaw += 90f * dt;
-            if (Raylib.IsKeyDown(KeyboardKey.Right) || Raylib.IsKeyDown(KeyboardKey.E)) camYaw -= 90f * dt;
-
-            // Update my player
-            UpdatePlayer(ref me, dt, camYaw);
-
-            // Send
-            sendTimer -= dt;
-            if (sendTimer <= 0f && connected)
-            {
-                sendTimer = SEND_RATE;
-                Send($"P:{me.Pos.X:F2},{me.Pos.Y:F2},{me.Pos.Z:F2},{me.Checkpoint},{(me.Won?1:0)}");
-            }
-
-            // Camera
-            float pitchR = camPitch * MathF.PI / 180f;
-            float yawR   = camYaw   * MathF.PI / 180f;
-            Vector3 camOff = new Vector3(
-                MathF.Sin(yawR) * camDist * MathF.Cos(pitchR),
-                MathF.Sin(pitchR) * camDist,
-                MathF.Cos(yawR)  * camDist * MathF.Cos(pitchR)
-            );
-            Camera3D cam = new Camera3D(
-                me.Pos + camOff,
-                me.Pos + new Vector3(0, 0.5f, 0),
-                Vector3.UnitY, 60f,
-                CameraProjection.Perspective
-            );
-
-            // =================== RENDER ===================
-            Raylib.BeginDrawing();
-            Raylib.ClearBackground(new Color(100, 180, 255, 255));
-            Raylib.BeginMode3D(cam);
-
-            // Draw the full 3D model if loaded (as decoration/visual)
-            if (obbyModel.HasValue)
-            {
-                // Scale down and center the model (it's huge in original coordinates)
-                // The model spans ~700 units; we want it to roughly match our collision boxes
-                Raylib.DrawModel(obbyModel.Value, Vector3.Zero, 1.0f, Color.White);
-            }
-            else
-            {
-                // === GRASS GROUND ===
-                float groundY = -35f;
-                Raylib.DrawCube(new Vector3(-190f, groundY - 0.5f, 138f), 120f, 1f, 30f, new Color(34, 139, 34, 255));
-                var rng = new System.Random(42);
-                for (int g = 0; g < 120; g++)
-                {
-                    float gx = -250f + (float)rng.NextDouble() * 120f;
-                    float gz = 123f  + (float)rng.NextDouble() * 30f;
-                    float gh = 0.4f  + (float)rng.NextDouble() * 0.5f;
-                    var gc = new Color(20 + rng.Next(40), 100 + rng.Next(80), 20 + rng.Next(30), 255);
-                    Raylib.DrawCube(new Vector3(gx, groundY + gh / 2f, gz), 0.12f, gh, 0.12f, gc);
-                    Raylib.DrawCube(new Vector3(gx + 0.1f, groundY + gh * 0.6f, gz + 0.1f), 0.08f, gh * 0.8f, 0.08f, gc);
+            void main() {
+                vec4 texel = texture(texture0, fragTexCoord);
+                
+                // 1. Create a vignette effect (darker edges)
+                vec2 uv = fragTexCoord - 0.5;
+                float vgn = 1.0 - dot(uv, uv) * 1.3;
+                
+                // 2. Subtle arcade scanlines based on screen Y
+                float scanline = 0.95 + 0.05 * sin(fragTexCoord.y * 720.0 * 3.14159);
+                
+                // 3. Combine texture color with effects
+                vec3 rgb = texel.rgb * vgn * scanline;
+                
+                // Boost bright colors slightly for an artificial neon glow look
+                if (max(rgb.r, max(rgb.g, rgb.b)) > 0.6) {
+                    rgb *= 1.15;
                 }
 
-                // Draw colored boxes for each level object
-                foreach (var obj in levelObjs)
+                finalColor = vec4(rgb, texel.a) * fragColor * colDiffuse;
+            }";
+
+        static void Main(string[] args)
+        {
+            const int screenWidth  = 1280;
+            const int screenHeight = 720;
+
+            Raylib.SetConfigFlags(ConfigFlags.Msaa4xHint);
+            Raylib.InitWindow(screenWidth, screenHeight, "STARFIGHTER VELOCITY: TOTAL OVERDRIVE");
+            Raylib.SetTargetFPS(60);
+
+            // --- AUDIO ---
+            Raylib.InitAudioDevice();
+
+            static unsafe Sound MakeTone(float frequency, float durationSec, float volume, bool square = false, bool sawtooth = false)
+            {
+                int sampleRate  = 22050;
+                int sampleCount = (int)(sampleRate * durationSec);
+                int subChunk2Size = sampleCount * 2;
+                int chunkSize = 36 + subChunk2Size;
+                byte[] wavBytes = new byte[44 + subChunk2Size];
+
+                wavBytes[0] = 0x52; wavBytes[1] = 0x49; wavBytes[2] = 0x46; wavBytes[3] = 0x46;
+                BitConverter.GetBytes(chunkSize).CopyTo(wavBytes, 4);
+                wavBytes[8] = 0x57; wavBytes[9] = 0x41; wavBytes[10] = 0x56; wavBytes[11] = 0x45;
+                wavBytes[12] = 0x66; wavBytes[13] = 0x6D; wavBytes[14] = 0x74; wavBytes[15] = 0x20;
+                BitConverter.GetBytes(16).CopyTo(wavBytes, 16);
+                BitConverter.GetBytes((short)1).CopyTo(wavBytes, 20);
+                BitConverter.GetBytes((short)1).CopyTo(wavBytes, 22);
+                BitConverter.GetBytes(sampleRate).CopyTo(wavBytes, 24);
+                BitConverter.GetBytes(sampleRate * 2).CopyTo(wavBytes, 28);
+                BitConverter.GetBytes((short)2).CopyTo(wavBytes, 32);
+                BitConverter.GetBytes((short)16).CopyTo(wavBytes, 34);
+                wavBytes[36] = 0x64; wavBytes[37] = 0x61; wavBytes[38] = 0x74; wavBytes[39] = 0x61;
+                BitConverter.GetBytes(subChunk2Size).CopyTo(wavBytes, 40);
+
+                for (int i = 0; i < sampleCount; i++)
                 {
-                    if (obj.Kind == ObjKind.Kill)
+                    float t = (float)i / sampleRate;
+                    float val = sawtooth 
+                        ? 2.0f * (t * frequency - MathF.Floor(t * frequency + 0.5f))
+                        : (square ? (MathF.Sin(2.0f * MathF.PI * frequency * t) >= 0 ? 1.0f : -1.0f) : MathF.Sin(2.0f * MathF.PI * frequency * t));
+
+                    float fade = i > sampleCount * 0.9f ? 1.0f - (float)(i - sampleCount * 0.9f) / (sampleCount * 0.1f) : 1.0f;
+                    short sample = (short)(val * fade * volume * short.MaxValue);
+                    int pos = 44 + (i * 2);
+                    wavBytes[pos]     = (byte)(sample & 0xFF);
+                    wavBytes[pos + 1] = (byte)((sample >> 8) & 0xFF);
+                }
+                return Raylib.LoadSoundFromWave(Raylib.LoadWaveFromMemory(".wav", wavBytes));
+            }
+
+            Sound rumbleSound   = MakeTone(60.0f,  2.5f, 0.45f);
+            Sound stingSound    = MakeTone(880.0f, 0.8f, 0.28f, sawtooth: true);
+            Sound droneSound    = MakeTone(110.0f, 6.5f, 0.14f, square: true);
+            Sound laserSound    = MakeTone(620.0f, 0.12f, 0.22f, sawtooth: true);
+            Sound explodeSound  = MakeTone(90.0f,  0.4f, 0.35f, square: true);
+
+            // --- GRAPHICS & SHADER INITIALIZATION ---
+            Shader screenShader = Raylib.LoadShaderFromMemory(null, ScreenShaderCode);
+            int timeLoc = Raylib.GetShaderLocation(screenShader, "time");
+            
+            // Create a virtual canvas to render our 3D scene into before applying shaders
+            RenderTexture2D targetCanvas = Raylib.LoadRenderTexture(screenWidth, screenHeight);
+
+            // --- VARIABLES ---
+            GameState currentState = GameState.Flying;
+            int score = 0;
+            float survivalTime = 0.0f;
+            int killStreak = 0;
+            float streakTimer = 0.0f;
+            float totalElapsedGameTime = 0.0f; // Track uniform time for animations
+
+            float shipArmor          = 100.0f; // Adjusted to match standard 100% cap
+            float shipLengthModifier = 0.0f;
+            bool  hasRamp            = false;
+            int   upgradeTokens      = 0;
+
+            // Nitro System
+            float maxNitro   = 100.0f;
+            float currentNitro = 100.0f;
+            int   nitroLevel   = 1;
+            bool  isBoosting   = false;
+
+            // --- PLANET PROGRESSION VARIABLES ---
+            int planetLevel = 1;
+            int nextPlanetScore = 10000; // Keeping your customized 10k threshold
+            bool planetActive = false;
+            Vector3 planetPosition = Vector3.Zero;
+            float currentPlanetSize = 60.0f;
+
+            // Boss Attributes
+            int  nextBossScore   = 25000;
+            Vector3 bossPosition = Vector3.Zero;
+            float bossMaxHealth  = 300.0f;
+            float bossHealth     = 300.0f;
+            float bossSideMove   = 0.0f;
+            bool bossLaserActive = false;
+            Vector3 bossLaserPos = Vector3.Zero;
+
+            Vector3 shipPosition    = new Vector3(0.0f, 0.0f, 20.0f);
+            Vector3 targetVelocity  = Vector3.Zero;
+            Vector3 currentVelocity = Vector3.Zero;
+
+            float baseForwardSpeed = 66.0f;
+            float forwardSpeed     = 66.0f;
+            float strafeSpeed      = 52.0f;
+            float smoothFactor     = 14.5f;
+
+            float shipRoll  = 0.0f;
+            float shipPitch = 0.0f;
+            float currentFOV = 70.0f;
+
+            // --- LASER SYSTEM ---
+            const int maxLasers = 20;
+            Laser[] lasers = new Laser[maxLasers];
+            float fireCooldown = 0.0f;
+            bool alternateWing = false;
+
+            // --- PARTICLE SYSTEM ---
+            const int maxParticles = 100;
+            Particle[] particles = new Particle[maxParticles];
+            Random rand = new Random(1337);
+
+            Action<Vector3, Color, int> SpawnExplosion = (pos, color, count) => {
+                int spawned = 0;
+                for (int i = 0; i < maxParticles; i++)
+                {
+                    if (!particles[i].Active)
                     {
-                        // Pulsing red kill brick
-                        float pulse = MathF.Sin(totalTime * 6f) * 0.5f + 0.5f;
-                        Color kCol  = new Color(255, (int)(30 + pulse * 60), 30, 255);
-                        Raylib.DrawCube(obj.Center, obj.Size.X, obj.Size.Y, obj.Size.Z, kCol);
-                        Raylib.DrawCubeWires(obj.Center, obj.Size.X + 0.1f, obj.Size.Y + 0.1f, obj.Size.Z + 0.1f,
-                            new Color(255, 80, 80, 200));
+                        particles[i].Active = true;
+                        particles[i].Position = pos;
+                        particles[i].Velocity = new Vector3(
+                            (float)(rand.NextDouble() - 0.5) * 35.0f,
+                            (float)(rand.NextDouble() - 0.5) * 35.0f,
+                            (float)(rand.NextDouble() - 0.5) * 35.0f
+                        );
+                        particles[i].MainColor = color;
+                        particles[i].Lifetime = (float)rand.NextDouble() * 0.6f + 0.2f;
+                        spawned++;
+                        if (spawned >= count) break;
                     }
-                    else if (obj.Kind == ObjKind.Ladder)
+                }
+            };
+
+            // --- CUTSCENE ---
+            float cutsceneTimer = 0.0f;
+            const float CUTSCENE_DURATION = 6.5f;
+            float screenShake = 0.0f;
+            float cutsceneCamZoom = 70.0f;
+            Vector3 cutsceneCamPos = Vector3.Zero;
+            Vector3 cutsceneCamTarget = Vector3.Zero;
+            bool cutsceneInitialized = false;
+            bool stingPlayed = false;
+            Random shakeRand = new Random();
+
+            // --- ENVIRONMENT ---
+            const int maxObstacles = 55;
+            Obstacle[] obstacles = new Obstacle[maxObstacles];
+
+            Action ResetObstacles = () => {
+                for (int i = 0; i < maxObstacles; i++)
+                {
+                    obstacles[i] = new Obstacle {
+                        Position = new Vector3(
+                            (float)rand.NextDouble() * 84.0f - 42.0f,
+                            (float)rand.NextDouble() * 54.0f - 27.0f,
+                            shipPosition.Z - ((float)rand.NextDouble() * 240.0f + 60.0f)
+                        ),
+                        Radius = (float)rand.NextDouble() * 4.2f + 1.2f,
+                        MainColor = new Color(rand.Next(40, 70), rand.Next(35, 45), rand.Next(40, 50), 255),
+                        WireColor = new Color(0, rand.Next(160, 240), rand.Next(200, 255), 255),
+                        RotationSpeed = (float)rand.NextDouble() * 50.0f - 25.0f,
+                        CurrentRotation = (float)rand.NextDouble() * 360.0f,
+                        Health = 20.0f
+                    };
+                }
+            };
+            ResetObstacles();
+
+            const int maxStars = 150;
+            Star[] spaceDust = new Star[maxStars];
+            for (int i = 0; i < maxStars; i++)
+            {
+                spaceDust[i] = new Star {
+                    Position = new Vector3((float)rand.NextDouble() * 110.0f - 55.0f, (float)rand.NextDouble() * 70.0f - 35.0f, (float)rand.NextDouble() * -220.0f),
+                    SpeedModifier = (float)rand.NextDouble() * 1.6f + 0.4f
+                };
+            }
+// ==========================================
+            // MAIN LOOP
+            // ==========================================
+            while (!Raylib.WindowShouldClose())
+            {
+                float deltaTime = Raylib.GetFrameTime();
+                totalElapsedGameTime += deltaTime;
+
+                // Decay streak
+                if (killStreak > 0)
+                {
+                    streakTimer -= deltaTime;
+                    if (streakTimer <= 0) killStreak = 0;
+                }
+
+                // Particles Update
+                for (int i = 0; i < maxParticles; i++)
+                {
+                    if (particles[i].Active)
                     {
-                        // Brown ladder — draw rungs
-                        Raylib.DrawCube(obj.Center, obj.Size.X * 0.15f, obj.Size.Y, obj.Size.Z * 0.15f,
-                            new Color(140, 90, 30, 255));
-                        int rungs = (int)(obj.Size.Y / 1.5f);
-                        for (int r = 0; r < rungs; r++)
-                        {
-                            float ry = obj.Center.Y - obj.Size.Y / 2f + r * 1.5f + 0.75f;
-                            Raylib.DrawCube(new Vector3(obj.Center.X, ry, obj.Center.Z),
-                                obj.Size.X, 0.2f, obj.Size.Z * 0.15f,
-                                new Color(180, 120, 40, 255));
-                        }
+                        particles[i].Position += particles[i].Velocity * deltaTime;
+                        particles[i].Lifetime -= deltaTime;
+                        if (particles[i].Lifetime <= 0) particles[i].Active = false;
+                    }
+                }
+
+                // ==========================================
+                // LOGIC PROCESSOR
+                // ==========================================
+                if (currentState == GameState.Flying || currentState == GameState.BossFight)
+                {
+                    survivalTime += deltaTime;
+                    int multi = 1 + (killStreak / 4) + (isBoosting ? 1 : 0);
+                    score += (int)(deltaTime * 80 * multi);
+
+                    // Check Boss Milestone Trigger
+                    if (score >= nextBossScore && currentState == GameState.Flying)
+                    {
+                        currentState = GameState.BossFight;
+                        bossPosition = new Vector3(0.0f, 15.0f, shipPosition.Z - 180.0f);
+                        bossHealth = bossMaxHealth;
+                        planetActive = false; 
+                    }
+
+                    // Check Planet Trigger 
+                    if (score >= nextPlanetScore && !planetActive && currentState == GameState.Flying)
+                    {
+                        planetActive = true;
+                        float distance = 850.0f + (planetLevel * 450.0f);
+                        planetPosition = new Vector3(0, 0, shipPosition.Z - distance);
+                    }
+
+                    if (planetActive && (shipPosition.Z - planetPosition.Z) < 350.0f && currentState == GameState.Flying)
+                    {
+                        currentState = GameState.PlanetApproach;
+                        cutsceneTimer = 0.0f;
+                        cutsceneInitialized = false;
+                        stingPlayed = false;
+                        isBoosting = false;
+                    }
+
+                    // --- NITRO SPEED FLUIDITY ---
+                    if (Raylib.IsKeyDown(KeyboardKey.LeftShift) && currentNitro > 0)
+                    {
+                        isBoosting = true;
+                        forwardSpeed = baseForwardSpeed * 1.9f;
+                        currentNitro -= 28.0f * deltaTime;
+                        currentFOV = CustomLerp(currentFOV, 88.0f, 8.0f * deltaTime);
                     }
                     else
                     {
-                        bool isFinish = (levelObjs.IndexOf(obj) == FinishIndex);
-                        Color fc = isFinish
-                            ? new Color(50, (int)(180 + MathF.Sin(totalTime * 4) * 75), 80, 255)
-                            : obj.DrawColor;
-                        Raylib.DrawCube(obj.Center, obj.Size.X, obj.Size.Y, obj.Size.Z, fc);
-                        Raylib.DrawCubeWires(obj.Center, obj.Size.X + 0.05f, obj.Size.Y + 0.05f, obj.Size.Z + 0.05f,
-                            new Color(255, 255, 255, 25));
+                        isBoosting = false;
+                        forwardSpeed = baseForwardSpeed;
+                        currentFOV = CustomLerp(currentFOV, 70.0f, 6.0f * deltaTime);
+                    }
+                    if (currentNitro < 0) currentNitro = 0;
 
-                        // Finish flag
-                        if (isFinish)
+                    // --- WEAPONS CANNON LOGIC ---
+                    if (fireCooldown > 0) fireCooldown -= deltaTime;
+                    if (Raylib.IsKeyDown(KeyboardKey.Space) && fireCooldown <= 0)
+                    {
+                        fireCooldown = 0.16f;
+                        for (int i = 0; i < maxLasers; i++)
                         {
-                            Vector3 fb = obj.Center + new Vector3(0, obj.Size.Y / 2f, 0);
-                            Raylib.DrawCylinder(fb, 0.12f, 0.12f, 5f, 6, Color.White);
-                            Raylib.DrawCube(fb + new Vector3(0.8f, 4.2f, 0), 1.5f, 0.7f, 0.1f, Color.Gold);
+                            if (!lasers[i].Active)
+                            {
+                                lasers[i].Active = true;
+                                lasers[i].FromWingLeft = alternateWing;
+                                lasers[i].Position = shipPosition + new Vector3(alternateWing ? -2.0f : 2.0f, -0.1f, -2.0f);
+                                alternateWing = !alternateWing;
+                                Raylib.PlaySound(laserSound);
+                                break;
+                            }
+                        }
+                    }
+
+                    // Update Lasers
+                    for (int i = 0; i < maxLasers; i++)
+                    {
+                        if (lasers[i].Active)
+                        {
+                            lasers[i].Position.Z -= 280.0f * deltaTime; 
+                            if (lasers[i].Position.Z < shipPosition.Z - 300.0f) lasers[i].Active = false;
+                        }
+                    }
+
+                    // --- BOSS CONTROLLER ---
+                    if (currentState == GameState.BossFight)
+                    {
+                        bossPosition.Z = shipPosition.Z - 140.0f; 
+                        bossSideMove += deltaTime * 1.8f;
+                        bossPosition.X = MathF.Sin(bossSideMove) * 25.0f;
+                        bossPosition.Y = MathF.Cos(bossSideMove * 0.5f) * 8.0f + 4.0f;
+
+                        // Boss warning shots
+                        if (rand.Next(0, 40) == 5)
+                        {
+                            bossLaserActive = true;
+                            bossLaserPos = bossPosition;
+                        }
+
+                        if (bossLaserActive)
+                        {
+                            bossLaserPos.Z += 140.0f * deltaTime;
+                            if (Vector3.Distance(shipPosition, bossLaserPos) < 4.5f)
+                            {
+                                shipArmor -= 20.0f;
+                                bossLaserActive = false;
+                                if (shipArmor <= 0) currentState = GameState.GameOver;
+                            }
+                            if (bossLaserPos.Z > shipPosition.Z + 20.0f) bossLaserActive = false;
+                        }
+
+                        // Check Laser hits on Boss
+                        for (int l = 0; l < maxLasers; l++)
+                        {
+                            if (lasers[l].Active && Vector3.Distance(lasers[l].Position, bossPosition) < 14.0f)
+                            {
+                                lasers[l].Active = false;
+                                bossHealth -= 10.0f;
+                                SpawnExplosion(lasers[l].Position, Color.Red, 3);
+                                if (bossHealth <= 0)
+                                {
+                                    SpawnExplosion(bossPosition, Color.Gold, 45);
+                                    Raylib.PlaySound(explodeSound);
+                                    score += 5000;
+                                    nextBossScore += 35000;
+                                    nextPlanetScore = score + 2000; 
+                                    currentState = GameState.Flying;
+                                }
+                            }
+                        }
+                    }
+
+                    // --- MOVEMENT INPUT ---
+                    targetVelocity.X = 0.0f; targetVelocity.Y = 0.0f;
+                    if (Raylib.IsKeyDown(KeyboardKey.A)) targetVelocity.X = -strafeSpeed;
+                    if (Raylib.IsKeyDown(KeyboardKey.D)) targetVelocity.X =  strafeSpeed;
+                    if (Raylib.IsKeyDown(KeyboardKey.W)) targetVelocity.Y =  strafeSpeed;
+                    if (Raylib.IsKeyDown(KeyboardKey.S)) targetVelocity.Y = -strafeSpeed;
+
+                    currentVelocity.X = CustomLerp(currentVelocity.X, targetVelocity.X, smoothFactor * deltaTime);
+                    currentVelocity.Y = CustomLerp(currentVelocity.Y, targetVelocity.Y, smoothFactor * deltaTime);
+
+                    shipRoll  = CustomLerp(shipRoll,  -currentVelocity.X * 0.5f, 10.0f * deltaTime);
+                    shipPitch = CustomLerp(shipPitch,  currentVelocity.Y * 0.4f, 10.0f * deltaTime);
+
+                    shipPosition.X += currentVelocity.X * deltaTime;
+                    shipPosition.Y += currentVelocity.Y * deltaTime;
+                    shipPosition.Z -= forwardSpeed * deltaTime;
+
+                    shipPosition.X = Math.Clamp(shipPosition.X, -45.0f, 45.0f);
+                    shipPosition.Y = Math.Clamp(shipPosition.Y, -28.0f, 28.0f);
+
+                    // --- OBSTACLES & COLLISION ENGINE ---
+                    for (int i = 0; i < maxObstacles; i++)
+                    {
+                        obstacles[i].CurrentRotation += obstacles[i].RotationSpeed * deltaTime;
+
+                        if (obstacles[i].Position.Z > shipPosition.Z + 20.0f)
+                        {
+                            obstacles[i].Position.Z = shipPosition.Z - 240.0f;
+                            obstacles[i].Position.X = (float)rand.NextDouble() * 84.0f - 42.0f;
+                            obstacles[i].Position.Y = (float)rand.NextDouble() * 54.0f - 27.0f;
+                            obstacles[i].Health = 20.0f;
+                        }
+
+                        // Laser hits asteroid
+                        for (int l = 0; l < maxLasers; l++)
+                        {
+                            if (lasers[l].Active && Vector3.Distance(lasers[l].Position, obstacles[i].Position) < (obstacles[i].Radius + 1.0f))
+                            {
+                                lasers[l].Active = false;
+                                obstacles[i].Health -= 10.0f;
+                                if (obstacles[i].Health <= 0)
+                                {
+                                    SpawnExplosion(obstacles[i].Position, obstacles[i].WireColor, 8);
+                                    Raylib.PlaySound(explodeSound);
+                                    obstacles[i].Position.Z = shipPosition.Z - 240.0f; 
+                                    killStreak++;
+                                    streakTimer = 3.5f;
+                                    score += 250 * killStreak;
+                                }
+                            }
+                        }
+
+                        // Ship crashes into asteroid
+                        float distance = Vector3.Distance(shipPosition, obstacles[i].Position);
+                        if (distance < (obstacles[i].Radius + 1.2f))
+                        {
+                            shipArmor -= hasRamp ? 10.0f : 25.0f; 
+                            SpawnExplosion(obstacles[i].Position, Color.Orange, 12);
+                            obstacles[i].Position.Z = shipPosition.Z - 240.0f;
+
+                            if (shipArmor <= 0) currentState = GameState.GameOver;
                         }
                     }
                 }
-            }
-
-            // My player
-            DrawPlayer(me.Pos, myCol, me.OnGround, me.OnLadder, totalTime);
-
-            // Their player
-            bool theirVis = connected && (totalTime - theirLastSeen) < 3f;
-            if (theirVis) DrawPlayer(them.Pos, theirCol, false, false, totalTime);
-
-            Raylib.EndMode3D();
-
-            // =================== HUD ===================
-            string role = isHost ? "HOST — Blue" : "CLIENT — Red";
-            Raylib.DrawText(role, 20, 16, 24, myCol);
-
-            // Progress
-            float prog = (float)me.Checkpoint / (levelObjs.Count - 1);
-            Raylib.DrawText("YOUR PROGRESS", 20, 50, 15, Color.Gray);
-            Raylib.DrawRectangle(20, 68, 200, 12, new Color(30, 30, 50, 255));
-            Raylib.DrawRectangle(20, 68, (int)(200 * prog), 12, myCol);
-            Raylib.DrawRectangleLines(20, 68, 200, 12, Color.DarkGray);
-
-            if (theirVis)
-            {
-                float tProg = (float)them.Checkpoint / (levelObjs.Count - 1);
-                Raylib.DrawText("OPPONENT", 20, 86, 15, Color.Gray);
-                Raylib.DrawRectangle(20, 102, 200, 12, new Color(30, 30, 50, 255));
-                Raylib.DrawRectangle(20, 102, (int)(200 * tProg), 12, theirCol);
-                Raylib.DrawRectangleLines(20, 102, 200, 12, Color.DarkGray);
-            }
-
-            if (me.OnLadder)
-                Raylib.DrawText("🪜 ON LADDER — W/S to climb", 20, 130, 18, new Color(255, 200, 80, 255));
-
-            if (!connected)
-            {
-                int dots = ((int)(totalTime * 2)) % 4;
-                Raylib.DrawText("Waiting for opponent" + new string('.', dots), 20, 155, 18, Color.Yellow);
-            }
-
-            if (isHost)
-            {
-                string ip = GetLocalIP();
-                Raylib.DrawText($"Your IP: {ip}", Raylib.GetScreenWidth() - 310, 16, 18, Color.LightGray);
-                Raylib.DrawText("Friend:  dotnet run -- client " + ip, Raylib.GetScreenWidth() - 450, 38, 13, Color.Gray);
-            }
-
-            // Controls
-            Raylib.DrawText("WASD: Move   SPACE: Jump   Right-Click+Drag: Camera   Scroll: Zoom   Q/E: Rotate", 20, Raylib.GetScreenHeight() - 34, 15,
-                new Color(100, 100, 130, 255));
-            // DEBUG: show player position
-            Raylib.DrawText($"POS: {me.Pos.X:F1}, {me.Pos.Y:F1}, {me.Pos.Z:F1}   [F] Set Spawn Here   [R] Respawn", 20, Raylib.GetScreenHeight() - 60, 18, Color.Yellow);
-
-            // Win/Lose
-            if (me.Won)
-            {
-                Raylib.DrawRectangle(0, 0, Raylib.GetScreenWidth(), Raylib.GetScreenHeight(), new Color(0,0,0,160));
-                Raylib.DrawText("🏆 YOU WIN!", Raylib.GetScreenWidth()/2 - 180, Raylib.GetScreenHeight()/2 - 50, 72, Color.Gold);
-                Raylib.DrawText("Press ESC to quit", Raylib.GetScreenWidth()/2 - 110, Raylib.GetScreenHeight()/2 + 50, 22, Color.LightGray);
-            }
-            else if (them.Won && theirVis)
-            {
-                Raylib.DrawRectangle(0, 0, Raylib.GetScreenWidth(), Raylib.GetScreenHeight(), new Color(60,0,0,160));
-                Raylib.DrawText("OPPONENT WINS", Raylib.GetScreenWidth()/2 - 230, Raylib.GetScreenHeight()/2 - 40, 60, Color.Red);
-            }
-
-            Raylib.EndDrawing();
-        }
-
-        Raylib.CloseWindow();
-        udp?.Close();
-    }
-
-    // =============================================
-    // DRAW PLAYER
-    // =============================================
-    static void DrawPlayer(Vector3 pos, Color col, bool onGround, bool onLadder, float t)
-    {
-        // Body
-        Raylib.DrawCube(pos + new Vector3(0, 0.5f, 0), 0.9f, 1.0f, 0.9f, col);
-        Raylib.DrawCubeWires(pos + new Vector3(0, 0.5f, 0), 0.92f, 1.02f, 0.92f, Color.White);
-        // Head
-        Color headCol = new Color(Math.Min(col.R + 40, 255), Math.Min(col.G + 40, 255), Math.Min(col.B + 40, 255), 255);
-        Raylib.DrawCube(pos + new Vector3(0, 1.35f, 0), 0.65f, 0.65f, 0.65f, headCol);
-        // Eyes
-        Raylib.DrawCube(pos + new Vector3(-0.15f, 1.42f, -0.34f), 0.12f, 0.12f, 0.05f, Color.White);
-        Raylib.DrawCube(pos + new Vector3( 0.15f, 1.42f, -0.34f), 0.12f, 0.12f, 0.05f, Color.White);
-        // Shadow
-        if (onGround)
-            Raylib.DrawCircle3D(new Vector3(pos.X, pos.Y + 0.02f, pos.Z), 0.55f, new Vector3(1,0,0), 90f, new Color(0,0,0,70));
-        // Ladder glow
-        if (onLadder)
-        {
-            float g = MathF.Sin(t * 8f) * 0.5f + 0.5f;
-            Raylib.DrawCubeWires(pos + new Vector3(0, 0.8f, 0), 1.4f, 2.4f, 1.4f,
-                new Color(255, (int)(180 + g * 75), 50, (int)(120 + g * 100)));
-        }
-    }
-
-    // =============================================
-    // HELPERS
-    // =============================================
-    static bool InAABB(Vector3 point, Vector3 center, Vector3 size)
-    {
-        return MathF.Abs(point.X - center.X) < size.X / 2f &&
-               MathF.Abs(point.Y - center.Y) < size.Y / 2f &&
-               MathF.Abs(point.Z - center.Z) < size.Z / 2f;
-    }
-
-    static float Lerp(float a, float b, float t) => a + (b - a) * t;
-
-    static void Send(string msg)
-    {
-        try
-        {
-            byte[] d = Encoding.UTF8.GetBytes(msg);
-            if (isHost) udp.Send(d, d.Length, remoteEP);
-            else        udp.Send(d, d.Length);
-        }
-        catch (Exception e) { Console.WriteLine($"[SEND] {e.Message}"); }
-    }
-
-    static void ReceiveLoop()
-    {
-        while (true)
-        {
-            try
-            {
-                IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
-                byte[] data   = udp.Receive(ref ep);
-                string msg    = Encoding.UTF8.GetString(data);
-
-                if (msg == "HELLO" && isHost)   { remoteEP = ep; connected = true; Send("ACK"); continue; }
-                if (msg == "ACK"   && !isHost)  { connected = true; continue; }
-                if (msg == "WIN")               { them.Won = true; if (isHost) remoteEP = ep; continue; }
-
-                if (msg.StartsWith("P:"))
+                else if (currentState == GameState.PlanetApproach)
                 {
-                    if (isHost) remoteEP = ep;
-                    string[] p = msg.Substring(2).Split(',');
-                    if (p.Length >= 5 &&
-                        float.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x) &&
-                        float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y) &&
-                        float.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z) &&
-                        int.TryParse(p[3], out int ck) &&
-                        int.TryParse(p[4], out int won))
+                    cutsceneTimer += deltaTime;
+                    if (!cutsceneInitialized)
                     {
-                        them.Pos        = new Vector3(x, y, z);
-                        them.Checkpoint = ck;
-                        if (won == 1) them.Won = true;
-                        theirLastSeen   = totalTime;
-                        connected       = true;
+                        cutsceneInitialized = true;
+                        Raylib.PlaySound(rumbleSound);
+                        Raylib.PlaySound(droneSound);
+                    }
+
+                    float t = cutsceneTimer / CUTSCENE_DURATION;
+                    shipPosition.Z -= baseForwardSpeed * deltaTime;
+
+                    if (t < 0.3f)
+                    {
+                        float p = t / 0.3f;
+                        cutsceneCamPos = new Vector3(shipPosition.X * 0.85f, shipPosition.Y * 0.85f + 4.5f + CustomLerp(0, 12.0f, p), shipPosition.Z + CustomLerp(12.0f, 28.0f, p));
+                        cutsceneCamTarget = new Vector3(CustomLerp(shipPosition.X, planetPosition.X, p * 0.4f), CustomLerp(shipPosition.Y, planetPosition.Y - 10.0f, p), shipPosition.Z - 20.0f);
+                        cutsceneCamZoom = CustomLerp(70.0f, 55.0f, p);
+                    }
+                    else if (t < 0.5f)
+                    {
+                        float p = (t - 0.3f) / 0.2f;
+                        if (!stingPlayed) { Raylib.PlaySound(stingSound); stingPlayed = true; }
+                        screenShake = CustomLerp(8.0f, 0.0f, p);
+                        float sx = (float)(shakeRand.NextDouble() - 0.5) * screenShake;
+                        float sy = (float)(shakeRand.NextDouble() - 0.5) * screenShake;
+                        cutsceneCamPos = new Vector3(shipPosition.X * 0.85f + sx, shipPosition.Y * 0.85f + 16.5f + sy, shipPosition.Z + 28.0f);
+                        cutsceneCamTarget = planetPosition;
+                        cutsceneCamZoom = CustomLerp(55.0f, 85.0f, p);
+                    }
+                    else if (t < 0.85f)
+                    {
+                        float p = (t - 0.5f) / 0.35f;
+                        cutsceneCamPos = new Vector3(CustomLerp(shipPosition.X * 0.85f, planetPosition.X, p * 0.3f), CustomLerp(shipPosition.Y * 0.85f + 16.5f, planetPosition.Y + 20.0f, p), CustomLerp(shipPosition.Z + 28.0f, planetPosition.Z + 120.0f, p));
+                        cutsceneCamTarget = planetPosition;
+                        cutsceneCamZoom = CustomLerp(85.0f, 45.0f, p);
+                    }
+                    else
+                    {
+                        cutsceneCamPos = new Vector3(planetPosition.X, planetPosition.Y + 20.0f, planetPosition.Z + 120.0f);
+                        cutsceneCamTarget = planetPosition;
+                        cutsceneCamZoom = 45.0f;
+                    }
+
+                    if (cutsceneTimer >= CUTSCENE_DURATION)
+                    {
+                        currentState = GameState.Landing;
+                        planetActive = false;
+                        nextPlanetScore = score + 15000 + (planetLevel * 5000);
+                        planetLevel++;
+                        currentPlanetSize += 25.0f;
+                        Raylib.StopSound(droneSound);
                     }
                 }
-            }
-            catch (Exception e) { Console.WriteLine($"[RECV] {e.Message}"); break; }
-        }
-    }
+                else if (currentState == GameState.Landing)
+                {
+                    if (Raylib.IsKeyPressed(KeyboardKey.Enter))
+                    {
+                        upgradeTokens++;
+                        currentState = GameState.Upgrading;
+                    }
+                }
+                else if (currentState == GameState.Upgrading)
+                {
+                    if (upgradeTokens > 0)
+                    {
+                        if (Raylib.IsKeyPressed(KeyboardKey.A)) { shipArmor = Math.Min(shipArmor + 50, 100); upgradeTokens--; }
+                        if (Raylib.IsKeyPressed(KeyboardKey.L)) { shipLengthModifier += 1.0f; upgradeTokens--; }
+                        if (Raylib.IsKeyPressed(KeyboardKey.B)) { nitroLevel++; maxNitro += 50.0f; upgradeTokens--; }
+                        if (Raylib.IsKeyPressed(KeyboardKey.R)) { hasRamp = true; upgradeTokens--; }
+                    }
+                    if (Raylib.IsKeyPressed(KeyboardKey.Space))
+                    {
+                        currentState = GameState.Flying;
+                        currentNitro = maxNitro;
+                        ResetObstacles();
+                    }
+                }
+                else if (currentState == GameState.GameOver)
+                {
+                    if (Raylib.IsKeyPressed(KeyboardKey.R))
+                    {
+                        shipPosition = new Vector3(0.0f, 0.0f, 20.0f);
+                        survivalTime = 0.0f; score = 0; killStreak = 0; shipArmor = 100.0f;
+                        shipLengthModifier = 0.0f; hasRamp = false; upgradeTokens = 0;
+                        maxNitro = 100.0f; currentNitro = 100.0f; nitroLevel = 1;
+                        planetLevel = 1; currentPlanetSize = 60.0f;
+                        nextPlanetScore = 10000; nextBossScore = 25000; planetActive = false;
+                        currentState = GameState.Flying;
+                        ResetObstacles();
+                    }
+                }
 
-    static string GetLocalIP()
-    {
-        try
-        {
-            using var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0);
-            s.Connect("8.8.8.8", 65530);
-            return (s.LocalEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+                // ==========================================
+                // RENDER PIPELINE (SHADOWED LAYER CANVAS)
+                // ==========================================
+                Camera3D camera = (currentState == GameState.PlanetApproach)
+                    ? new Camera3D(cutsceneCamPos, cutsceneCamTarget, Vector3.UnitY, cutsceneCamZoom, CameraProjection.Perspective)
+                    : new Camera3D(new Vector3(shipPosition.X * 0.85f, shipPosition.Y * 0.85f + 4.5f, shipPosition.Z + 12.0f), new Vector3(shipPosition.X, shipPosition.Y, shipPosition.Z - 20.0f), Vector3.UnitY, currentFOV, CameraProjection.Perspective);
+
+                // Update dynamic variables for Shader calculations
+                Raylib.SetShaderValue(screenShader, timeLoc, totalElapsedGameTime, ShaderUniformDataType.Float);
+
+                // --- PASS 1: DRAW TO OFF-SCREEN CANVAS ---
+                Raylib.BeginTextureMode(targetCanvas);
+                Raylib.ClearBackground(new Color(3, 3, 8, 255)); // Slightly darker ambient backdrop
+
+                if (currentState != GameState.Upgrading)
+                {
+                    Raylib.BeginMode3D(camera);
+
+                    // Render Stars
+                    for (int i = 0; i < maxStars; i++)
+                    {
+                        float starSpeedFactor = isBoosting ? 2.8f : 1.0f;
+                        spaceDust[i].Position.Z += (forwardSpeed * 0.12f * spaceDust[i].SpeedModifier * (starSpeedFactor - 1.0f)) * deltaTime;
+
+                        if (spaceDust[i].Position.Z > shipPosition.Z + 10.0f)
+                        {
+                            spaceDust[i].Position.Z = shipPosition.Z - 220.0f;
+                            spaceDust[i].Position.X = (float)rand.NextDouble() * 110.0f - 55.0f;
+                            spaceDust[i].Position.Y = (float)rand.NextDouble() * 70.0f - 35.0f;
+                        }
+                        Vector3 starEnd = spaceDust[i].Position + new Vector3(0, 0, isBoosting ? 15.0f : 4.0f);
+                        Raylib.DrawLine3D(spaceDust[i].Position, starEnd, isBoosting ? Color.SkyBlue : Color.DarkBlue);
+                    }
+
+                    // Render Particles
+                    for (int i = 0; i < maxParticles; i++)
+                    {
+                        if (particles[i].Active)
+                            Raylib.DrawCube(particles[i].Position, 0.4f, 0.4f, 0.4f, particles[i].MainColor);
+                    }
+
+                    // Render Plasma Lasers
+                    for (int i = 0; i < maxLasers; i++)
+                    {
+                        if (lasers[i].Active)
+                        {
+                            Raylib.DrawCube(lasers[i].Position, 0.15f, 0.15f, 3.0f, Color.Green);
+                            Raylib.DrawCubeWires(lasers[i].Position, 0.2f, 0.2f, 3.1f, Color.Lime);
+                        }
+                    }
+
+                    // Render Boss Dreadnought
+                    if (currentState == GameState.BossFight)
+                    {
+                        Raylib.DrawCube(bossPosition, 18.0f, 4.5f, 22.0f, Color.Maroon);
+                        Raylib.DrawCubeWires(bossPosition, 18.2f, 4.7f, 22.2f, Color.Red);
+                        Raylib.DrawCube(bossPosition + new Vector3(0, 0, -11.5f), 6.0f, 1.5f, 1.0f, Color.Magenta);
+
+                        if (bossLaserActive)
+                        {
+                            Raylib.DrawCube(bossLaserPos, 0.8f, 0.8f, 5.0f, Color.Purple);
+                            Raylib.DrawLine3D(bossPosition, bossLaserPos, Color.Magenta);
+                        }
+                    }
+
+                    // Planet
+                    if (planetActive || currentState == GameState.PlanetApproach || currentState == GameState.Landing)
+                    {
+                        Raylib.DrawSphere(planetPosition, currentPlanetSize, Color.DarkPurple);
+                        Raylib.DrawSphereWires(planetPosition, currentPlanetSize + 2.0f, 16, 16, Color.Magenta);
+                    }
+
+                    // Obstacles
+                    for (int i = 0; i < maxObstacles; i++)
+                    {
+                        Raylib.DrawSphere(obstacles[i].Position, obstacles[i].Radius, obstacles[i].MainColor);
+                        Raylib.DrawSphereWires(obstacles[i].Position, obstacles[i].Radius, 6, 6, obstacles[i].WireColor);
+                    }
+
+                    // Ship
+                    if (currentState != GameState.GameOver)
+                    {
+                        float enginePulse = 1.0f + MathF.Sin((float)Raylib.GetTime() * 45.0f) * 0.15f;
+                        Vector3 exhaustPos = shipPosition + new Vector3(0, 0, 1.4f + (shipLengthModifier / 2));
+                        
+                        if (isBoosting)
+                        {
+                            Raylib.DrawCube(exhaustPos, 0.7f * enginePulse, 0.7f * enginePulse, 4.5f, Color.SkyBlue);
+                            Raylib.DrawCubeWires(exhaustPos, 0.75f * enginePulse, 0.75f * enginePulse, 4.6f, Color.Blue);
+                        }
+                        else
+                        {
+                            Raylib.DrawCube(exhaustPos, 0.5f * enginePulse, 0.5f * enginePulse, 1.0f, Color.Orange);
+                        }
+
+                        Rlgl.PushMatrix();
+                        Rlgl.Translatef(shipPosition.X, shipPosition.Y, shipPosition.Z);
+                        Rlgl.Rotatef(shipRoll,  0, 0, 1);
+                        Rlgl.Rotatef(shipPitch, 1, 0, 0);
+                        Raylib.DrawCube(Vector3.Zero, 1.2f, 0.6f, 2.8f + shipLengthModifier, Color.DarkBlue);
+                        Raylib.DrawCubeWires(Vector3.Zero, 1.22f, 0.62f, 2.82f + shipLengthModifier, Color.SkyBlue);
+                        Raylib.DrawCube(Vector3.Zero, 4.5f, 0.15f, 0.8f, Color.Blue);
+                        if (hasRamp) Raylib.DrawCube(new Vector3(0, -0.4f, -1.5f), 1.0f, 0.2f, 1.5f, Color.Gray);
+                        Rlgl.PopMatrix();
+                    }
+
+                    Raylib.EndMode3D();
+                }
+
+                // Render overlay elements onto texture frame buffer
+                if (currentState == GameState.Flying || currentState == GameState.BossFight)
+                {
+                    Raylib.DrawRectangleGradientH(0, 0, screenWidth / 2, 60, new Color(0, 40, 80, 120), new Color(0, 0, 0, 0));
+                    Raylib.DrawFPS(20, 15);
+                    Raylib.DrawText($"SCORE: {score:D7}", 110, 15, 24, Color.Green);
+
+                    if (killStreak > 0)
+                        Raylib.DrawText($"STREAK: x{killStreak} ({streakTimer:F1}s)", screenWidth - 240, 15, 20, Color.Gold);
+
+                    Color armorColor = shipArmor > 40 ? Color.Green : Color.Red;
+                    Raylib.DrawText($"HULL: {shipArmor}%", 20, 60, 20, armorColor);
+
+                    float nitroRatio = currentNitro / maxNitro;
+                    Raylib.DrawText("NITRO:", 180, 60, 20, Color.LightGray);
+                    Raylib.DrawRectangle(260, 64, 140, 12, Color.DarkGray);
+                    Raylib.DrawRectangle(260, 64, (int)(140 * nitroRatio), 12, isBoosting ? Color.SkyBlue : Color.Blue);
+
+                    if (currentState == GameState.BossFight)
+                    {
+                        Raylib.DrawRectangle(screenWidth / 2 - 200, 20, 400, 20, Color.Maroon);
+                        Raylib.DrawRectangle(screenWidth / 2 - 200, 20, (int)(400 * (bossHealth / bossMaxHealth)), 20, Color.Red);
+                        Raylib.DrawRectangleLines(screenWidth / 2 - 200, 20, 400, 20, Color.White);
+                        Raylib.DrawText("BOSS: VOID BREAKER", screenWidth / 2 - 95, 23, 18, Color.White);
+                    }
+                }
+                else if (currentState == GameState.Upgrading)
+                {
+                    Raylib.DrawRectangle(0, 0, screenWidth, screenHeight, new Color(15, 15, 30, 255));
+                    Raylib.DrawText("--- PLANETARY OUTPOST OUTFITTERS ---", screenWidth / 2 - 280, 100, 30, Color.Gold);
+                    Raylib.DrawText($"TOKENS AVAILABLE: {upgradeTokens}", screenWidth / 2 - 120, 170, 22, Color.White);
+
+                    Raylib.DrawText("[A] INJECT NANO-REPAIR (+50% Hull)", screenWidth / 2 - 180, 240, 20, upgradeTokens > 0 ? Color.Green : Color.DarkGray);
+                    Raylib.DrawText("[L] LENGTHEN CHASSIS STABILITY", screenWidth / 2 - 180, 290, 20, upgradeTokens > 0 ? Color.Green : Color.DarkGray);
+                    Raylib.DrawText($"[B] UPGRADE NITRO CORE (LVL {nitroLevel})", screenWidth / 2 - 180, 340, 20, upgradeTokens > 0 ? Color.SkyBlue : Color.DarkGray);
+                    Raylib.DrawText(hasRamp ? "[R] DEFLECTOR INSTALLED" : "[R] ADD TITANIUM DEFLECTOR RAMP", screenWidth / 2 - 180, 390, 20, (upgradeTokens > 0 && !hasRamp) ? Color.Green : Color.DarkGray);
+
+                    Raylib.DrawText("PRESS [SPACE] TO LAUNCH SHIP", screenWidth / 2 - 150, 540, 20, Color.SkyBlue);
+                }
+                else if (currentState == GameState.Landing)
+                {
+                    Raylib.DrawRectangle(0, 0, screenWidth, screenHeight, new Color(0, 0, 0, 160));
+                    Raylib.DrawText("SAFE DOCKING AREA CLEAR", screenWidth / 2 - 240, screenHeight / 2 - 30, 36, Color.Magenta);
+                    Raylib.DrawText("PRESS 'ENTER' TO TOUCH DOWN", screenWidth / 2 - 150, screenHeight / 2 + 30, 20, Color.White);
+                }
+                else if (currentState == GameState.GameOver)
+                {
+                    Raylib.DrawRectangle(0, 0, screenWidth, screenHeight, new Color(40, 0, 0, 220));
+                    Raylib.DrawText("CRITICAL FAILURE - SHIP DESTROYED", screenWidth / 2 - 340, screenHeight / 2 - 40, 36, Color.Red);
+                    Raylib.DrawText("PRESS 'R' TO RESPAWN CHASSIS", screenWidth / 2 - 150, screenHeight / 2 + 30, 20, Color.Gray);
+                }
+
+                Raylib.EndTextureMode();
+
+                // --- PASS 2: RENDER CANVAS TO WINDOW THROUGH THE SHADER ---
+                Raylib.BeginDrawing();
+                Raylib.ClearBackground(Color.Black);
+
+                Raylib.BeginShaderMode(screenShader);
+                // Draw target canvas flipped along Y-axis because textures load upside down in modern OpenGL framing
+                Raylib.DrawTextureRec(
+                    targetCanvas.Texture, 
+                    new Rectangle(0, 0, targetCanvas.Texture.Width, -targetCanvas.Texture.Height), 
+                    Vector2.Zero, 
+                    Color.White
+                );
+                Raylib.EndShaderMode();
+
+                Raylib.EndDrawing();
+            }
+
+            // --- CLEANUP ---
+            Raylib.UnloadShader(screenShader);
+            Raylib.UnloadRenderTexture(targetCanvas);
+            Raylib.UnloadSound(rumbleSound); Raylib.UnloadSound(stingSound); Raylib.UnloadSound(droneSound);
+            Raylib.UnloadSound(laserSound); Raylib.UnloadSound(explodeSound);
+            Raylib.CloseAudioDevice();
+            Raylib.CloseWindow();
         }
-        catch { return "unknown"; }
     }
 }
